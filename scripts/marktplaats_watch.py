@@ -101,6 +101,19 @@ SEARCH_TERMS = [
 # de titel staat, ongeacht wat Marktplaats zelf teruggeeft.
 REQUIRED_BRAND_KEYWORDS = ["aixam", "axiam", "aixan", "aixem", "minauto"]
 
+# Losse onderdelen (geen complete auto's). We checken deze ALLEEN tegen de
+# titel — een titel die begint met/draait om zo'n onderdeel is vrijwel
+# altijd een losse-onderdeel-advertentie, terwijl "Aixam voor onderdelen"
+# (een hele auto die gesloopt wordt) dit woord juist niet bevat en dus
+# gewoon zichtbaar blijft.
+PART_LISTING_KEYWORDS = [
+    "startmotor", "dynamo", "versnellingsbak", "koppelingsplaat",
+    "distributieriem", "cilinderkop", "carburateur", "remschijf",
+    "remschijven", "aandrijfas", "cv-as", "motorblok", "cardanas",
+    "stuurhuis", "krukas", "nokkenas", "uitlaat los", "koplamp los",
+    "achterlicht los", "velgen los", "banden los",
+]
+
 # Advertenties waarvan de titel een van deze woorden bevat, worden genegeerd
 EXCLUDE_TEXT_KEYWORDS = [
     "scootmobiel",
@@ -671,6 +684,12 @@ def main():
             if not any(brand in combined_text for brand in REQUIRED_BRAND_KEYWORDS):
                 continue
             if any(bad.lower() in combined_text for bad in EXCLUDE_TEXT_KEYWORDS):
+                continue
+            # Losse onderdelen (startmotor, dynamo, enz.) alleen op titel
+            # checken — "Aixam voor onderdelen" (hele auto) bevat deze
+            # specifieke onderdeelnamen niet en blijft dus gewoon zichtbaar.
+            title_lower_only = listing["title"].lower()
+            if any(part in title_lower_only for part in PART_LISTING_KEYWORDS):
                 continue
 
             # Model + conditie + numerieke prijs bepalen. Dit doen we voor
