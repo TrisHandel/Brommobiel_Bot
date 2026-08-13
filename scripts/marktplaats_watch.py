@@ -88,6 +88,13 @@ SEARCH_TERMS = [
     "45 km auto defect",
 ]
 
+# Veiligheidsnet: Marktplaats matcht bij meerdere zoekwoorden (bv. "Aixam
+# defect") niet altijd op ALLE woorden samen — soms komen er ook advertenties
+# terug die maar 1 van de woorden bevatten (bv. een Audi met "defect" in de
+# titel). Daarom vereisen we hier hard dat 1 van deze merknamen letterlijk in
+# de titel staat, ongeacht wat Marktplaats zelf teruggeeft.
+REQUIRED_BRAND_KEYWORDS = ["aixam", "axiam", "aixan", "aixem", "minauto"]
+
 # Advertenties waarvan de titel een van deze woorden bevat, worden genegeerd
 EXCLUDE_TITLE_KEYWORDS = [
     "scootmobiel",
@@ -389,6 +396,8 @@ def main():
             if listing.get("is_business"):
                 continue
             title_lower = listing["title"].lower()
+            if not any(brand in title_lower for brand in REQUIRED_BRAND_KEYWORDS):
+                continue
             if any(bad.lower() in title_lower for bad in EXCLUDE_TITLE_KEYWORDS):
                 continue
             if listing["id"] in seen_ids or listing["id"] in new_listings:
