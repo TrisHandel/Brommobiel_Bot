@@ -63,6 +63,9 @@ MAX_SEEN_IDS = 5000  # voorkomt dat het state-bestand oneindig groeit
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Apart, gemute kanaal voor "geen nieuwe advertenties"-heartbeats. Valt terug
+# op de hoofdchat als deze niet is ingesteld.
+TELEGRAM_HEARTBEAT_CHAT_ID = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID") or TELEGRAM_CHAT_ID
 
 HEADERS = {
     "User-Agent": (
@@ -212,15 +215,16 @@ def save_seen_ids(seen_ids: set):
 # Telegram
 # ---------------------------------------------------------------------------
 
-def send_telegram_message(text: str, silent: bool = False):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("TELEGRAM_BOT_TOKEN of TELEGRAM_CHAT_ID ontbreekt, kan geen bericht sturen.", file=sys.stderr)
+def send_telegram_message(text: str, silent: bool = False, chat_id: str = None):
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not target_chat:
+        print("TELEGRAM_BOT_TOKEN of chat-ID ontbreekt, kan geen bericht sturen.", file=sys.stderr)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(
         url,
         data={
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": target_chat,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": "false",
@@ -289,17 +293,21 @@ def main():
         return
 
     if not new_listings:
-        # HEARTBEAT: ook zonder nieuwe advertenties een bericht sturen, zodat je
-        # zeker weet dat de check heeft gedraaid — maar altijd stil, geen pop-up.
         print("Geen nieuwe advertenties.")
         if search_errors:
+            # Een echte fout is belangrijk genoeg om op je hoofdchat te melden,
+            # met normale pop-up, zodat je 'm niet mist.
             send_telegram_message(
                 f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
-                f"maar er ging iets mis bij: {'; '.join(search_errors)}",
-                silent=True,
+                f"maar er ging iets mis bij: {'; '.join(search_errors)}"
             )
         else:
-            send_telegram_message(f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.", silent=True)
+            # Rustige heartbeat: naar het apart gemute kanaal, stil.
+            send_telegram_message(
+                f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.",
+                silent=True,
+                chat_id=TELEGRAM_HEARTBEAT_CHAT_ID,
+            )
         return
 
     # Echte nieuwe advertentie(s): normale pop-up, behalve tijdens de nachtelijke
