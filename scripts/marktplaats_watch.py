@@ -235,6 +235,7 @@ def main():
     seen_ids = load_seen_ids()
     first_run = len(seen_ids) == 0
     new_listings = {}
+    search_errors = []
 
     for term in SEARCH_TERMS:
         print(f"Zoeken naar: {term}")
@@ -242,6 +243,7 @@ def main():
             listings = fetch_listings(term)
         except requests.RequestException as e:
             print(f"  fout bij ophalen van '{term}': {e}", file=sys.stderr)
+            search_errors.append(f"{term}: {e}")
             continue
 
         print(f"  {len(listings)} advertenties gevonden")
@@ -258,13 +260,29 @@ def main():
     seen_ids.update(new_listings.keys())
     save_seen_ids(seen_ids)
 
+    timestamp = time.strftime("%d-%m-%Y %H:%M", time.localtime())
+
     if first_run:
         # Bij de allereerste run alleen de state vullen, niet alles spammen
         print(f"Eerste run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
+        send_telegram_message(
+            f"👋 Marktplaats-watcher is gestart ({timestamp}). "
+            f"{len(new_listings)} bestaande advertenties opgeslagen als basis. "
+            f"Vanaf nu krijg je een melding bij elke check."
+        )
         return
 
     if not new_listings:
+        # HEARTBEAT: ook zonder nieuwe advertenties een bericht sturen,
+        # zodat je zeker weet dat de check daadwerkelijk heeft gedraaid.
         print("Geen nieuwe advertenties.")
+        if search_errors:
+            send_telegram_message(
+                f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
+                f"maar er ging iets mis bij: {'; '.join(search_errors)}"
+            )
+        else:
+            send_telegram_message(f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.")
         return
 
     print(f"{len(new_listings)} nieuwe advertentie(s), Telegram-berichten versturen...")
@@ -275,4 +293,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
