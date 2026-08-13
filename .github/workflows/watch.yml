@@ -6,7 +6,7 @@ on:
     # daadwerkelijk ondersteunt (alles sneller wordt genegeerd/overgeslagen).
     - cron: "*/5 * * * *"
   workflow_dispatch: {}   # handmatig starten via de Actions-tab
-
+# trigger refresh
 permissions:
   contents: write   # nodig om de state-bestanden terug te committen
 
