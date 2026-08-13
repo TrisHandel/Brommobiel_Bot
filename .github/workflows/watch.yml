@@ -5,7 +5,12 @@ on:
     # Elke 10 minuten. GitHub garandeert geen exacte timing (bij drukte kan
     # het een paar minuten uitlopen), maar dit is de instelling.
     - cron: "*/10 * * * *"
-  workflow_dispatch: {}   # handmatig starten via de Actions-tab
+  workflow_dispatch:   # handmatig starten via de Actions-tab
+    inputs:
+      seed_only:
+        description: "Alleen seed-run (state bijwerken zonder meldingen te versturen)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # nodig om state/seen_ids.json terug te committen
@@ -34,6 +39,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_HEARTBEAT_CHAT_ID: ${{ secrets.TELEGRAM_HEARTBEAT_CHAT_ID }}
+          SEED_ONLY: ${{ github.event.inputs.seed_only }}
         run: python scripts/marktplaats_watch.py
 
       - name: Sla bijgewerkte state op
