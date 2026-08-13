@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import statistics
 import sys
 import time
 from datetime import datetime
@@ -96,7 +97,7 @@ SEARCH_TERMS = [
 REQUIRED_BRAND_KEYWORDS = ["aixam", "axiam", "aixan", "aixem", "minauto"]
 
 # Advertenties waarvan de titel een van deze woorden bevat, worden genegeerd
-EXCLUDE_TITLE_KEYWORDS = [
+EXCLUDE_TEXT_KEYWORDS = [
     "scootmobiel",
     # Opkoop-/inkoopbedrijven en reclame ("Wij kopen uw Aixam!", etc.)
     "wij kopen",
@@ -143,10 +144,68 @@ EXCLUDE_TITLE_KEYWORDS = [
     "altijd meerdere",
     "wisselende voorraad",
     "dagelijks nieuwe aanbiedingen",
+    # Extra opkoop-/inkooptaal, herkend in daadwerkelijke Marktplaats-teksten
+    "inkoop specialist",
+    "wij kopen iedere",
+    "we kopen iedere",
+    "ongeacht de staat",
+    "hoogste prijs",
+    "gezocht!",
+    "*gezocht*",
+    "€€gezocht€€",
+    "zoal dagelijks ophalen",
+    "zoal dagelijks inkopen",
+    "auto inkoop service",
+    "verkoop snel en moeiteloos",
+    "beste autoverkoop",
+    "snelle en transparante afhandeling",
+    "geld op uw rekening",
+    "canta en brommobiel inkoop",
+    "canta & brommobiel inkoop",
+    "brommobiel of canta",
+    "10 jaar gespecialiseerd",
+    "grootste brommobiel center",
 ]
 
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "seen_ids.json"
 MAX_SEEN_IDS = 5000  # voorkomt dat het state-bestand oneindig groeit
+
+# Prijsgeschiedenis per model, voor de "goede deal?"-vergelijking. Ruw en
+# zonder correctie voor bouwjaar/km — puur een signaal, geen harde waarheid.
+PRICE_HISTORY_FILE = Path(__file__).resolve().parent.parent / "state" / "price_history.json"
+MAX_PRICES_PER_MODEL = 100  # hoeveel recente prijzen we per model bewaren
+MIN_SAMPLES_FOR_COMPARISON = 4  # onder dit aantal is een gemiddelde nog te onbetrouwbaar
+DEAL_DISCOUNT_THRESHOLD = 0.40  # 40%+ onder de mediaan = "mogelijke topdeal"
+
+# Modelnamen waarop we de titel matchen, van specifiek naar algemeen (zodat
+# "Aixam Crossline Sport" bijv. als "Crossline" geteld wordt, niet als iets
+# generieks). De eerste match in de titel wint.
+MODEL_KEYWORDS = [
+    "Crossline", "Crossover", "Cross", "Coupé", "Coupe", "Scouty",
+    "City", "GTO", "Minauto", "D-Truck", "Kubota", "Pro", "Sport",
+]
+
+# Staat/conditie-tiers, van slechtst naar best. We checken titel+omschrijving
+# in deze volgorde en gebruiken de EERSTE match — zo voorkomen we dat een
+# sloper wordt vergeleken met de prijs van een showroomexemplaar (en dus ten
+# onrechte als "topdeal" wordt gezien). Zonder match: gewone "gebruikt"-tier.
+CONDITION_TIERS = [
+    ("sloop/onderdelen", [
+        "sloop", "sloper", "sloopauto", "voor onderdelen", "demontage", "export",
+    ]),
+    ("schade/defect", [
+        "schade", "defect", "kapot", "loopt niet", "start niet", "total loss",
+        "motor kapot", "storing",
+    ]),
+    ("opknapper/project", [
+        "opknapper", "project", "sleutelklaar", "voor de klusser",
+    ]),
+    ("nieuwstaat", [
+        "nieuwstaat", "als nieuw", "showroomstaat", "showroom staat",
+        "fabrieksnieuw", "0 km", "zo goed als nieuw",
+    ]),
+]
+DEFAULT_CONDITION_TIER = "gebruikt"
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -264,14 +323,26 @@ def normalize_listing(item: dict):
     # kan ook een losse, goedkope inruiler verkopen die je wél wilt zien. Het
     # enige harde filter hier is een gesponsorde/advertentie-plaatsing. Het
     # onderscheid handelaar-met-veel-voorraad vs eenmalige koop maken we op
-    # titeltekst, zie EXCLUDE_TITLE_KEYWORDS ("meer op voorraad" e.d.).
+    # tekst, zie EXCLUDE_TEXT_KEYWORDS ("meer op voorraad" e.d.).
     is_business = False
     if item.get("sponsored") is True or item.get("isSponsored") is True or item.get("isAdvertisement") is True:
         is_business = True
 
+    # Best-effort: Marktplaats kan de (korte) omschrijving onder verschillende
+    # veldnamen aanleveren. We proberen de bekendste varianten; als geen
+    # ervan aanwezig is, blijft description gewoon leeg (geen harde fout).
+    description = (
+        item.get("description")
+        or item.get("shortDescription")
+        or item.get("descriptionHtml")
+        or item.get("plainTextDescription")
+        or ""
+    )
+
     return {
         "id": item_id,
         "title": unescape(str(title)),
+        "description": unescape(str(description)),
         "price": price_text or "onbekend",
         "url": url,
         "location": location,
@@ -317,14 +388,89 @@ def save_seen_ids(seen_ids: set):
 
 
 # ---------------------------------------------------------------------------
+# Prijsvergelijking per model ("is dit een goede deal?")
+# ---------------------------------------------------------------------------
+
+def load_price_history() -> dict:
+    if PRICE_HISTORY_FILE.exists():
+        try:
+            return json.loads(PRICE_HISTORY_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_price_history(history: dict):
+    PRICE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    trimmed = {
+        model: {cond: prices[-MAX_PRICES_PER_MODEL:] for cond, prices in conditions.items()}
+        for model, conditions in history.items()
+    }
+    PRICE_HISTORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def guess_model(title: str) -> str:
+    title_lower = title.lower()
+    for model in MODEL_KEYWORDS:
+        if model.lower() in title_lower:
+            return model
+    return "Aixam (overig)"
+
+
+def guess_condition(text: str) -> str:
+    """Bepaalt een ruwe staat-tier op basis van titel+omschrijving, zodat we
+    prijzen alleen vergelijken binnen dezelfde conditie (een sloper mag niet
+    met een showroomexemplaar vergeleken worden)."""
+    text_lower = text.lower()
+    for tier_name, keywords in CONDITION_TIERS:
+        if any(kw in text_lower for kw in keywords):
+            return tier_name
+    return DEFAULT_CONDITION_TIER
+
+
+def parse_price_to_number(price_text: str):
+    """Zet '€ 1.234' om naar 1234.0. Geeft None terug bij 'onbekend',
+    'Bieden', 'Gratis' e.d. — die kunnen we niet numeriek vergelijken."""
+    if not price_text:
+        return None
+    digits = re.sub(r"[^\d]", "", price_text)
+    if not digits:
+        return None
+    try:
+        value = float(digits)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def check_deal(model: str, condition: str, price: float, history: dict):
+    """Vergelijkt price met de mediaan van eerder gezien prijzen voor dit
+    model EN dezelfde conditie-tier (dus geen sloper vs. showroomexemplaar).
+    Geeft (is_deal, mediaan, korting_percentage) terug."""
+    samples = history.get(model, {}).get(condition, [])
+    if len(samples) < MIN_SAMPLES_FOR_COMPARISON:
+        return False, None, None
+    median_price = statistics.median(samples)
+    if median_price <= 0:
+        return False, None, None
+    discount = (median_price - price) / median_price
+    is_deal = discount >= DEAL_DISCOUNT_THRESHOLD
+    return is_deal, median_price, discount
+
+
+# ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
 
 def send_telegram_message(text: str, silent: bool = False, chat_id: str = None):
+    """Verstuurt een bericht. Geeft het message_id terug bij succes (nodig om
+    het bericht evt. te kunnen pinnen), of None bij een fout."""
     target_chat = chat_id or TELEGRAM_CHAT_ID
     if not TELEGRAM_BOT_TOKEN or not target_chat:
         print("TELEGRAM_BOT_TOKEN of chat-ID ontbreekt, kan geen bericht sturen.", file=sys.stderr)
-        return
+        return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(
         url,
@@ -339,6 +485,28 @@ def send_telegram_message(text: str, silent: bool = False, chat_id: str = None):
     )
     if not resp.ok:
         print(f"Telegram-fout ({resp.status_code}): {resp.text}", file=sys.stderr)
+        return None
+    try:
+        return resp.json().get("result", {}).get("message_id")
+    except (ValueError, AttributeError):
+        return None
+
+
+def pin_telegram_message(message_id: int, chat_id: str = None):
+    """Pint een bericht vast in de chat, zodat topdeals bovenaan blijven
+    staan. Best-effort: als pinnen niet mag/lukt, laten we de rest van het
+    script gewoon doorlopen."""
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not target_chat or not message_id:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/pinChatMessage"
+    resp = requests.post(
+        url,
+        data={"chat_id": target_chat, "message_id": message_id, "disable_notification": "false"},
+        timeout=20,
+    )
+    if not resp.ok:
+        print(f"Telegram-pin-fout ({resp.status_code}): {resp.text}", file=sys.stderr)
 
 
 def format_message(listing: dict) -> str:
@@ -347,6 +515,22 @@ def format_message(listing: dict) -> str:
     location = listing["location"]
     url = listing["url"]
     location_line = f"\n📍 {location}" if location else ""
+
+    deal_info = listing.get("deal_info")
+    if deal_info:
+        median_price, discount = deal_info
+        pct = round(discount * 100)
+        condition = listing.get("condition", "onbekend")
+        return (
+            f"🔥 <b>MOGELIJKE TOPDEAL</b>\n"
+            f"<b>{title}</b>\n"
+            f"💶 {price} (gemiddeld voor '{condition}'-advertenties van dit model: "
+            f"~€ {median_price:,.0f}, dus ~{pct}% goedkoper)\n"
+            f"⚠️ Ruwe schatting op basis van model + conditie + prijs alleen — "
+            f"check zelf bouwjaar, km-stand en staat!"
+            f"{location_line}\n{url}"
+        )
+
     return f"🆕 <b>{title}</b>\n💶 {price}{location_line}\n{url}"
 
 
@@ -356,6 +540,7 @@ def format_message(listing: dict) -> str:
 
 def main():
     seen_ids = load_seen_ids()
+    price_history = load_price_history()
     first_run = len(seen_ids) == 0
     new_listings = {}
     search_errors = []
@@ -395,13 +580,29 @@ def main():
         for listing in listings:
             if listing.get("is_business"):
                 continue
-            title_lower = listing["title"].lower()
-            if not any(brand in title_lower for brand in REQUIRED_BRAND_KEYWORDS):
+            # Titel + omschrijving samen checken: sommige advertenties noemen
+            # "Aixam" pas in de omschrijving, en opkoopbedrijven verstoppen
+            # hun taal ("wij kopen iedere...") ook vaak in de omschrijving.
+            combined_text = f"{listing['title']} {listing.get('description', '')}".lower()
+            if not any(brand in combined_text for brand in REQUIRED_BRAND_KEYWORDS):
                 continue
-            if any(bad.lower() in title_lower for bad in EXCLUDE_TITLE_KEYWORDS):
+            if any(bad.lower() in combined_text for bad in EXCLUDE_TEXT_KEYWORDS):
                 continue
             if listing["id"] in seen_ids or listing["id"] in new_listings:
                 continue
+
+            # Model + conditie + numerieke prijs bepalen voor de deal-vergelijking.
+            model = guess_model(listing["title"])
+            condition = guess_condition(combined_text)
+            numeric_price = parse_price_to_number(listing["price"])
+            listing["model"] = model
+            listing["condition"] = condition
+            listing["numeric_price"] = numeric_price
+            if numeric_price is not None:
+                is_deal, median_price, discount = check_deal(model, condition, numeric_price, price_history)
+                if is_deal:
+                    listing["deal_info"] = (median_price, discount)
+
             new_listings[listing["id"]] = listing
 
         # Iets langere, licht willekeurige pauze tussen zoekopdrachten: minder
@@ -410,6 +611,16 @@ def main():
 
     seen_ids.update(new_listings.keys())
     save_seen_ids(seen_ids)
+
+    # Prijshistorie bijwerken met alle nieuwe advertenties (ook de niet-deals),
+    # per model EN conditie, zodat het gemiddelde steeds betrouwbaarder wordt
+    # zonder slopers en showroomexemplaren met elkaar te vermengen.
+    for listing in new_listings.values():
+        if listing.get("numeric_price") is not None:
+            price_history.setdefault(listing["model"], {}).setdefault(listing["condition"], []).append(
+                listing["numeric_price"]
+            )
+    save_price_history(price_history)
 
     timestamp = datetime.now(TIMEZONE).strftime("%d-%m-%Y %H:%M")
     quiet = in_quiet_hours()  # 00:00-05:00: berichten wel versturen, maar zonder pop-up
@@ -472,7 +683,12 @@ def main():
     # stille uren (00:00-05:00) — dan komt het bericht wel binnen, maar stil.
     print(f"{len(new_listings)} nieuwe advertentie(s), Telegram-berichten versturen...")
     for listing in new_listings.values():
-        send_telegram_message(format_message(listing), silent=quiet)
+        is_deal = bool(listing.get("deal_info"))
+        # Een mogelijke topdeal altijd met pop-up versturen, ook 's nachts —
+        # dit is precies het soort melding waarvoor je wél gewekt wilt worden.
+        message_id = send_telegram_message(format_message(listing), silent=(quiet and not is_deal))
+        if is_deal and message_id:
+            pin_telegram_message(message_id)
         time.sleep(0.5)
 
 
