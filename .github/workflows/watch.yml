@@ -39,6 +39,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_HEARTBEAT_CHAT_ID: ${{ secrets.TELEGRAM_HEARTBEAT_CHAT_ID }}
+          RUN_NUMBER: ${{ github.run_number }}
           SEED_ONLY: ${{ github.event.inputs.seed_only }}
         run: python scripts/marktplaats_watch.py
 
