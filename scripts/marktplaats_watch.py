@@ -212,6 +212,14 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.marktplaats.nl/",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 NEXT_DATA_RE = re.compile(
@@ -455,12 +463,28 @@ def main():
     if not new_listings:
         print("Geen nieuwe advertenties.")
         if search_errors:
+            # Bij véél gelijktijdige fouten (bv. Marktplaats blokkeert de bot
+            # tijdelijk) een korte samenvatting sturen i.p.v. elke losse fout
+            # te noemen — anders wordt het bericht te lang voor Telegram
+            # (limiet ~4096 tekens) en komt het helemaal niet aan.
+            forbidden_count = sum(1 for e in search_errors if "403" in e or "Forbidden" in e)
+            if len(search_errors) >= 10 and forbidden_count >= len(search_errors) - 2:
+                text = (
+                    f"🚫 Check uitgevoerd ({timestamp}): {len(search_errors)} van de "
+                    f"{len(SEARCH_TERMS)} zoekopdrachten kregen een 403 Forbidden. "
+                    f"Marktplaats blokkeert de bot mogelijk (tijdelijk of structureel) — "
+                    f"check de Actions-log als dit blijft aanhouden."
+                )
+            else:
+                summary = "; ".join(search_errors[:5])
+                extra = f" (+{len(search_errors) - 5} meer)" if len(search_errors) > 5 else ""
+                text = (
+                    f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
+                    f"maar er ging iets mis bij: {summary}{extra}"
+                )
             # Een echte fout is belangrijk genoeg om op je hoofdchat te melden,
             # met normale pop-up, zodat je 'm niet mist.
-            send_telegram_message(
-                f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
-                f"maar er ging iets mis bij: {'; '.join(search_errors)}"
-            )
+            send_telegram_message(text[:4000])
         else:
             # Rustige heartbeat: naar het apart gemute kanaal, stil.
             send_telegram_message(
