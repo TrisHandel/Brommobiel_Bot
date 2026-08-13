@@ -36,6 +36,12 @@ QUIET_HOURS_START = 0   # 00:00
 QUIET_HOURS_END = 5     # 05:00 (dus stil van 00:00 t/m 04:59)
 TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
+# Als deze env-variabele op "true" staat: alle huidige matches worden stil
+# aan seen_ids toegevoegd (net als bij de allereerste run), zonder dat er
+# ook maar 1 Telegram-melding wordt verstuurd. Handig na het toevoegen van
+# nieuwe zoektermen, om de inhaalvloed van bestaande advertenties te vermijden.
+FORCE_SEED_ONLY = os.environ.get("SEED_ONLY", "").strip().lower() == "true"
+
 
 def in_quiet_hours() -> bool:
     now = datetime.now(TIMEZONE)
@@ -410,15 +416,24 @@ def main():
     timestamp = datetime.now(TIMEZONE).strftime("%d-%m-%Y %H:%M")
     quiet = in_quiet_hours()  # 00:00-05:00: berichten wel versturen, maar zonder pop-up
 
-    if first_run:
-        # Bij de allereerste run alleen de state vullen, niet alles spammen
-        print(f"Eerste run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
-        send_telegram_message(
-            f"👋 Marktplaats-watcher is gestart ({timestamp}). "
-            f"{len(new_listings)} bestaande advertenties opgeslagen als basis. "
-            f"Vanaf nu krijg je een melding bij elke check.",
-            silent=quiet,
-        )
+    if first_run or FORCE_SEED_ONLY:
+        # Bij de allereerste run, of bij een handmatige seed-run na het
+        # toevoegen van nieuwe zoektermen: alleen de state vullen, niet spammen.
+        print(f"Seed-run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
+        if first_run:
+            send_telegram_message(
+                f"👋 Marktplaats-watcher is gestart ({timestamp}). "
+                f"{len(new_listings)} bestaande advertenties opgeslagen als basis. "
+                f"Vanaf nu krijg je een melding bij elke check.",
+                silent=quiet,
+            )
+        else:
+            send_telegram_message(
+                f"🔄 Seed-run uitgevoerd ({timestamp}): {len(new_listings)} bestaande advertenties "
+                f"toegevoegd aan de al-gezien-lijst, geen meldingen verstuurd.",
+                silent=True,
+                chat_id=TELEGRAM_HEARTBEAT_CHAT_ID,
+            )
         return
 
     if not new_listings:
