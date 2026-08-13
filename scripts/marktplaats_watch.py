@@ -22,11 +22,24 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from html import unescape
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import requests
+
+# Tussen deze uren (Nederlandse tijd) worden berichten stil verstuurd:
+# ze komen wel in Telegram binnen, maar zonder pop-up/geluid op je telefoon.
+QUIET_HOURS_START = 0   # 00:00
+QUIET_HOURS_END = 5     # 05:00 (dus stil van 00:00 t/m 04:59)
+TIMEZONE = ZoneInfo("Europe/Amsterdam")
+
+
+def in_quiet_hours() -> bool:
+    now = datetime.now(TIMEZONE)
+    return QUIET_HOURS_START <= now.hour < QUIET_HOURS_END
 
 # ---------------------------------------------------------------------------
 # Configuratie
@@ -199,7 +212,7 @@ def save_seen_ids(seen_ids: set):
 # Telegram
 # ---------------------------------------------------------------------------
 
-def send_telegram_message(text: str):
+def send_telegram_message(text: str, silent: bool = False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("TELEGRAM_BOT_TOKEN of TELEGRAM_CHAT_ID ontbreekt, kan geen bericht sturen.", file=sys.stderr)
         return
@@ -211,6 +224,7 @@ def send_telegram_message(text: str):
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": "false",
+            "disable_notification": "true" if silent else "false",
         },
         timeout=20,
     )
@@ -260,7 +274,8 @@ def main():
     seen_ids.update(new_listings.keys())
     save_seen_ids(seen_ids)
 
-    timestamp = time.strftime("%d-%m-%Y %H:%M", time.localtime())
+    timestamp = datetime.now(TIMEZONE).strftime("%d-%m-%Y %H:%M")
+    quiet = in_quiet_hours()  # 00:00-05:00: berichten wel versturen, maar zonder pop-up
 
     if first_run:
         # Bij de allereerste run alleen de state vullen, niet alles spammen
@@ -268,26 +283,30 @@ def main():
         send_telegram_message(
             f"👋 Marktplaats-watcher is gestart ({timestamp}). "
             f"{len(new_listings)} bestaande advertenties opgeslagen als basis. "
-            f"Vanaf nu krijg je een melding bij elke check."
+            f"Vanaf nu krijg je een melding bij elke check.",
+            silent=quiet,
         )
         return
 
     if not new_listings:
-        # HEARTBEAT: ook zonder nieuwe advertenties een bericht sturen,
-        # zodat je zeker weet dat de check daadwerkelijk heeft gedraaid.
+        # HEARTBEAT: ook zonder nieuwe advertenties een bericht sturen, zodat je
+        # zeker weet dat de check heeft gedraaid — maar altijd stil, geen pop-up.
         print("Geen nieuwe advertenties.")
         if search_errors:
             send_telegram_message(
                 f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
-                f"maar er ging iets mis bij: {'; '.join(search_errors)}"
+                f"maar er ging iets mis bij: {'; '.join(search_errors)}",
+                silent=True,
             )
         else:
-            send_telegram_message(f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.")
+            send_telegram_message(f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.", silent=True)
         return
 
+    # Echte nieuwe advertentie(s): normale pop-up, behalve tijdens de nachtelijke
+    # stille uren (00:00-05:00) — dan komt het bericht wel binnen, maar stil.
     print(f"{len(new_listings)} nieuwe advertentie(s), Telegram-berichten versturen...")
     for listing in new_listings.values():
-        send_telegram_message(format_message(listing))
+        send_telegram_message(format_message(listing), silent=quiet)
         time.sleep(0.5)
 
 
