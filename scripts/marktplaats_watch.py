@@ -177,6 +177,15 @@ MAX_PRICES_PER_MODEL = 100  # hoeveel recente prijzen we per model bewaren
 MIN_SAMPLES_FOR_COMPARISON = 4  # onder dit aantal is een gemiddelde nog te onbetrouwbaar
 DEAL_DISCOUNT_THRESHOLD = 0.40  # 40%+ onder de mediaan = "mogelijke topdeal"
 
+# Los van seen_ids: onthoudt welke advertentie-ID's al hebben meegeteld in de
+# prijsgeschiedenis. Dit MOET los staan van "is dit nieuw voor de gebruiker",
+# anders telt een advertentie die al lang bekend is (dus geen melding meer
+# waard) nooit mee voor de prijsvergelijking — met als gevolg dat de
+# prijsgeschiedenis nooit gevuld raakt voor advertenties die al bestonden
+# vóór deze functie werd toegevoegd.
+PRICED_IDS_FILE = Path(__file__).resolve().parent.parent / "state" / "priced_ids.json"
+MAX_PRICED_IDS = 5000
+
 # Modelnamen waarop we de titel matchen, van specifiek naar algemeen (zodat
 # "Aixam Crossline Sport" bijv. als "Crossline" geteld wordt, niet als iets
 # generieks). De eerste match in de titel wint.
@@ -387,6 +396,21 @@ def save_seen_ids(seen_ids: set):
     STATE_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_priced_ids() -> set:
+    if PRICED_IDS_FILE.exists():
+        try:
+            return set(json.loads(PRICED_IDS_FILE.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            return set()
+    return set()
+
+
+def save_priced_ids(priced_ids: set):
+    PRICED_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    trimmed = list(priced_ids)[-MAX_PRICED_IDS:]
+    PRICED_IDS_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Prijsvergelijking per model ("is dit een goede deal?")
 # ---------------------------------------------------------------------------
@@ -556,8 +580,10 @@ def format_message(listing: dict) -> str:
 def main():
     seen_ids = load_seen_ids()
     price_history = load_price_history()
+    priced_ids = load_priced_ids()
     first_run = len(seen_ids) == 0
     new_listings = {}
+    newly_priced_count = 0
     search_errors = []
 
     consecutive_forbidden = 0
@@ -603,22 +629,35 @@ def main():
                 continue
             if any(bad.lower() in combined_text for bad in EXCLUDE_TEXT_KEYWORDS):
                 continue
-            if listing["id"] in seen_ids or listing["id"] in new_listings:
-                continue
 
-            # Model + conditie + numerieke prijs bepalen voor de prijsvergelijking.
+            # Model + conditie + numerieke prijs bepalen. Dit doen we voor
+            # ELKE gevonden advertentie die door de filters komt, OOK als
+            # die al eerder gezien is — anders vult de prijsgeschiedenis
+            # zich nooit voor advertenties die al bestonden vóór deze
+            # functie werd toegevoegd.
             model = guess_model(listing["title"])
             condition = guess_condition(combined_text)
             numeric_price = parse_price_to_number(listing["price"])
             listing["model"] = model
             listing["condition"] = condition
             listing["numeric_price"] = numeric_price
+
             if numeric_price is not None:
                 tier_label, emoji, median_price, diff_pct = classify_price(
                     model, condition, numeric_price, price_history
                 )
                 if tier_label:
                     listing["price_tier"] = (tier_label, emoji, median_price, diff_pct)
+
+                # Elke unieke advertentie draagt precies 1x bij aan de
+                # prijsgeschiedenis, ongeacht of hij al "gezien" was.
+                if listing["id"] not in priced_ids:
+                    price_history.setdefault(model, {}).setdefault(condition, []).append(numeric_price)
+                    priced_ids.add(listing["id"])
+                    newly_priced_count += 1
+
+            if listing["id"] in seen_ids or listing["id"] in new_listings:
+                continue
 
             new_listings[listing["id"]] = listing
 
@@ -629,15 +668,10 @@ def main():
     seen_ids.update(new_listings.keys())
     save_seen_ids(seen_ids)
 
-    # Prijshistorie bijwerken met alle nieuwe advertenties (ook de niet-deals),
-    # per model EN conditie, zodat het gemiddelde steeds betrouwbaarder wordt
-    # zonder slopers en showroomexemplaren met elkaar te vermengen.
-    for listing in new_listings.values():
-        if listing.get("numeric_price") is not None:
-            price_history.setdefault(listing["model"], {}).setdefault(listing["condition"], []).append(
-                listing["numeric_price"]
-            )
+    # Prijshistorie + priced_ids zijn al bijgewerkt in de loop hierboven
+    # (voor elke unieke, kwalificerende advertentie, gezien of niet).
     save_price_history(price_history)
+    save_priced_ids(priced_ids)
 
     timestamp = datetime.now(TIMEZONE).strftime("%d-%m-%Y %H:%M")
     quiet = in_quiet_hours()  # 00:00-05:00: berichten wel versturen, maar zonder pop-up
@@ -645,21 +679,21 @@ def main():
     if first_run or FORCE_SEED_ONLY:
         # Bij de allereerste run, of bij een handmatige seed-run na het
         # toevoegen van nieuwe zoektermen: alleen de state vullen, niet spammen.
-        prices_added = sum(1 for l in new_listings.values() if l.get("numeric_price") is not None)
         print(f"Seed-run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
         if first_run:
             send_telegram_message(
                 f"👋 Marktplaats-watcher is gestart ({timestamp}). "
                 f"{len(new_listings)} bestaande advertenties opgeslagen als basis "
-                f"({prices_added} met bruikbare prijs voor de deal-vergelijking). "
+                f"({newly_priced_count} met bruikbare prijs voor de prijsvergelijking). "
                 f"Vanaf nu krijg je een melding bij elke check.",
                 silent=quiet,
             )
         else:
             send_telegram_message(
-                f"🔄 Seed-run uitgevoerd ({timestamp}): {len(new_listings)} bestaande advertenties "
-                f"toegevoegd aan de al-gezien-lijst, waarvan {prices_added} met prijs meegenomen "
-                f"in de prijsvergelijking. Geen meldingen verstuurd.",
+                f"🔄 Seed-run uitgevoerd ({timestamp}): {len(new_listings)} advertenties "
+                f"toegevoegd aan de al-gezien-lijst, en {newly_priced_count} advertenties "
+                f"(nieuw of al bekend) met prijs meegenomen in de prijsvergelijking. "
+                f"Geen meldingen verstuurd.",
                 silent=True,
                 chat_id=TELEGRAM_HEARTBEAT_CHAT_ID,
             )
