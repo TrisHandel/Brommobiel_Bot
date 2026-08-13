@@ -174,6 +174,27 @@ EXCLUDE_TITLE_KEYWORDS = [
     "inruilen",
     "handelaar",
     "dealer",
+    # Showroom-/dealeradvertenties (bedrijven die zelf voorraad verkopen)
+    "showroom",
+    "ons aanbod",
+    "onze occasions",
+    "ons magazijn",
+    "configurator",
+    "bekijk ons volledige aanbod",
+    "bekijk onze showroom",
+    # Taal die wijst op handelsvoorraad (meerdere exemplaren), niet op één
+    # eenmalige particuliere verkoop
+    "meer op voorraad",
+    "meerdere op voorraad",
+    "diverse op voorraad",
+    "ruime keuze",
+    "ruim aanbod",
+    "meer exemplaren beschikbaar",
+    "meer soortgelijke",
+    "meer van dit merk",
+    "altijd meerdere",
+    "wisselende voorraad",
+    "dagelijks nieuwe aanbiedingen",
 ]
 
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "seen_ids.json"
@@ -283,17 +304,12 @@ def normalize_listing(item: dict):
     if isinstance(loc, dict):
         location = loc.get("cityName") or loc.get("city") or ""
 
-    # Detecteer bedrijfs-/dealeraccounts en gesponsorde plaatsingen, zodat we
-    # die in main() eruit kunnen filteren (dit zijn vaak opkoopadvertenties
-    # die niet horen bij een echte, individuele tweedehands-advertentie).
+    # We filteren NIET meer op account-type (isDealer/sellerType): een dealer
+    # kan ook een losse, goedkope inruiler verkopen die je wél wilt zien. Het
+    # enige harde filter hier is een gesponsorde/advertentie-plaatsing. Het
+    # onderscheid handelaar-met-veel-voorraad vs eenmalige koop maken we op
+    # titeltekst, zie EXCLUDE_TITLE_KEYWORDS ("meer op voorraad" e.d.).
     is_business = False
-    seller = item.get("sellerInformation") or item.get("seller") or {}
-    if isinstance(seller, dict):
-        if seller.get("isDealer") is True or seller.get("isCompany") is True:
-            is_business = True
-        seller_type = str(seller.get("sellerType") or seller.get("accountType") or "").upper()
-        if seller_type in ("DEALER", "BUSINESS", "COMPANY"):
-            is_business = True
     if item.get("sponsored") is True or item.get("isSponsored") is True or item.get("isAdvertisement") is True:
         is_business = True
 
