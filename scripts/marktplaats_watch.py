@@ -19,6 +19,7 @@ vaker dan elke paar minuten), uit respect voor Marktplaats' servers.
 
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -412,6 +413,9 @@ def main():
     new_listings = {}
     search_errors = []
 
+    consecutive_forbidden = 0
+    aborted_early = False
+
     for term in SEARCH_TERMS:
         print(f"Zoeken naar: {term}")
         try:
@@ -419,7 +423,26 @@ def main():
         except requests.RequestException as e:
             print(f"  fout bij ophalen van '{term}': {e}", file=sys.stderr)
             search_errors.append(f"{term}: {e}")
+            if "403" in str(e) or "Forbidden" in str(e):
+                consecutive_forbidden += 1
+            else:
+                consecutive_forbidden = 0
+            if consecutive_forbidden >= 5:
+                # Marktplaats blokkeert kennelijk actief binnen deze run.
+                # Doorgaan maakt het waarschijnlijk alleen erger en kost
+                # alleen maar tijd — stop deze run vroegtijdig, de rest van
+                # de termen proberen we vanzelf weer bij de volgende run.
+                remaining = SEARCH_TERMS[SEARCH_TERMS.index(term) + 1:]
+                search_errors.append(
+                    f"Run vroegtijdig gestopt na {consecutive_forbidden}x 403 op rij "
+                    f"({len(remaining)} termen niet geprobeerd)."
+                )
+                aborted_early = True
+                break
+            time.sleep(4)  # bij een fout iets langer wachten voordat we verder gaan
             continue
+        else:
+            consecutive_forbidden = 0
 
         print(f"  {len(listings)} advertenties gevonden")
         for listing in listings:
@@ -432,7 +455,9 @@ def main():
                 continue
             new_listings[listing["id"]] = listing
 
-        time.sleep(1)  # even pauzeren tussen zoekopdrachten, netjes voor de server
+        # Iets langere, licht willekeurige pauze tussen zoekopdrachten: minder
+        # herkenbaar als robotverkeer dan een vast interval van 1 seconde.
+        time.sleep(random.uniform(2.5, 4.5))
 
     seen_ids.update(new_listings.keys())
     save_seen_ids(seen_ids)
