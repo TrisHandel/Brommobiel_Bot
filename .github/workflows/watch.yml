@@ -2,13 +2,13 @@ name: Marktplaats watch
 
 on:
   schedule:
-    # Elke 10 minuten. GitHub garandeert geen exacte timing (bij drukte kan
-    # het een paar minuten uitlopen), maar dit is de instelling.
-    - cron: "*/10 * * * *"
+    # Elke 5 minuten — dit is de snelste interval die GitHub Actions
+    # daadwerkelijk ondersteunt (alles sneller wordt genegeerd/overgeslagen).
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}   # handmatig starten via de Actions-tab
 
 permissions:
-  contents: write   # nodig om state/seen_ids.json terug te committen
+  contents: write   # nodig om de state-bestanden terug te committen
 
 concurrency:
   group: marktplaats-watch
@@ -37,8 +37,14 @@ jobs:
 
       - name: Sla bijgewerkte state op
         run: |
+          # Schrijft altijd een tijdstempel weg, zodat er elke run iets te
+          # committen valt. Dat houdt de repository "actief", waardoor
+          # GitHub de geplande workflow niet na 60 dagen stilzwijgend
+          # uitschakelt wegens inactiviteit.
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > state/last_run.txt
+
           git config user.name "marktplaats-watch-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add state/seen_ids.json
-          git diff --staged --quiet || git commit -m "Update seen listings [skip ci]"
+          git add state/seen_ids.json state/last_run.txt
+          git diff --staged --quiet || git commit -m "Update state [skip ci]"
           git push
