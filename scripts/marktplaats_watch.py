@@ -44,6 +44,11 @@ TIMEZONE = ZoneInfo("Europe/Amsterdam")
 # nieuwe zoektermen, om de inhaalvloed van bestaande advertenties te vermijden.
 FORCE_SEED_ONLY = os.environ.get("SEED_ONLY", "").strip().lower() == "true"
 
+# Run-nummer van GitHub Actions (bv. "42"), voor herkenbaarheid in Telegram-
+# berichten. Leeg als het script buiten Actions wordt gedraaid.
+RUN_NUMBER = os.environ.get("RUN_NUMBER", "").strip()
+RUN_LABEL = f" [run #{RUN_NUMBER}]" if RUN_NUMBER else ""
+
 
 def in_quiet_hours() -> bool:
     now = datetime.now(TIMEZONE)
@@ -682,7 +687,7 @@ def main():
         print(f"Seed-run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
         if first_run:
             send_telegram_message(
-                f"👋 Marktplaats-watcher is gestart ({timestamp}). "
+                f"👋 Marktplaats-watcher is gestart ({timestamp}){RUN_LABEL}. "
                 f"{len(new_listings)} bestaande advertenties opgeslagen als basis "
                 f"({newly_priced_count} met bruikbare prijs voor de prijsvergelijking). "
                 f"Vanaf nu krijg je een melding bij elke check.",
@@ -690,7 +695,7 @@ def main():
             )
         else:
             send_telegram_message(
-                f"🔄 Seed-run uitgevoerd ({timestamp}): {len(new_listings)} advertenties "
+                f"🔄 Seed-run uitgevoerd ({timestamp}){RUN_LABEL}: {len(new_listings)} advertenties "
                 f"toegevoegd aan de al-gezien-lijst, en {newly_priced_count} advertenties "
                 f"(nieuw of al bekend) met prijs meegenomen in de prijsvergelijking. "
                 f"Geen meldingen verstuurd.",
@@ -709,7 +714,7 @@ def main():
             forbidden_count = sum(1 for e in search_errors if "403" in e or "Forbidden" in e)
             if len(search_errors) >= 10 and forbidden_count >= len(search_errors) - 2:
                 text = (
-                    f"🚫 Check uitgevoerd ({timestamp}): {len(search_errors)} van de "
+                    f"🚫 Check uitgevoerd ({timestamp}){RUN_LABEL}: {len(search_errors)} van de "
                     f"{len(SEARCH_TERMS)} zoekopdrachten kregen een 403 Forbidden. "
                     f"Marktplaats blokkeert de bot mogelijk (tijdelijk of structureel) — "
                     f"check de Actions-log als dit blijft aanhouden."
@@ -718,7 +723,7 @@ def main():
                 summary = "; ".join(search_errors[:5])
                 extra = f" (+{len(search_errors) - 5} meer)" if len(search_errors) > 5 else ""
                 text = (
-                    f"⚠️ Check uitgevoerd ({timestamp}), geen nieuwe advertenties, "
+                    f"⚠️ Check uitgevoerd ({timestamp}){RUN_LABEL}, geen nieuwe advertenties, "
                     f"maar er ging iets mis bij: {summary}{extra}"
                 )
             # Een echte fout is belangrijk genoeg om op je hoofdchat te melden,
@@ -727,7 +732,7 @@ def main():
         else:
             # Rustige heartbeat: naar het apart gemute kanaal, stil.
             send_telegram_message(
-                f"✅ Check uitgevoerd ({timestamp}) — geen nieuwe advertenties.",
+                f"✅ Check uitgevoerd ({timestamp}){RUN_LABEL} — geen nieuwe advertenties.",
                 silent=True,
                 chat_id=TELEGRAM_HEARTBEAT_CHAT_ID,
             )
