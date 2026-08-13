@@ -144,6 +144,30 @@ SEARCH_TERMS = [
 # Advertenties waarvan de titel een van deze woorden bevat, worden genegeerd
 EXCLUDE_TITLE_KEYWORDS = [
     "scootmobiel",
+    # Opkoop-/inkoopbedrijven en reclame ("Wij kopen uw Aixam!", etc.)
+    "wij kopen",
+    "we kopen",
+    "ik koop",
+    "aankoop",
+    "inkoop",
+    "wij betalen",
+    "we betalen",
+    "contant geld",
+    "direct geld",
+    "gratis ophalen",
+    "gratis inleveren",
+    "spoedaankoop",
+    "verkoop uw",
+    "verkoop jouw",
+    "verkoopt u uw",
+    "wilt u uw",
+    "auto's opkopen",
+    "auto opkopen",
+    "voertuigen opkopen",
+    "taxatie",
+    "inruilen",
+    "handelaar",
+    "dealer",
 ]
 
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "seen_ids.json"
@@ -253,12 +277,27 @@ def normalize_listing(item: dict):
     if isinstance(loc, dict):
         location = loc.get("cityName") or loc.get("city") or ""
 
+    # Detecteer bedrijfs-/dealeraccounts en gesponsorde plaatsingen, zodat we
+    # die in main() eruit kunnen filteren (dit zijn vaak opkoopadvertenties
+    # die niet horen bij een echte, individuele tweedehands-advertentie).
+    is_business = False
+    seller = item.get("sellerInformation") or item.get("seller") or {}
+    if isinstance(seller, dict):
+        if seller.get("isDealer") is True or seller.get("isCompany") is True:
+            is_business = True
+        seller_type = str(seller.get("sellerType") or seller.get("accountType") or "").upper()
+        if seller_type in ("DEALER", "BUSINESS", "COMPANY"):
+            is_business = True
+    if item.get("sponsored") is True or item.get("isSponsored") is True or item.get("isAdvertisement") is True:
+        is_business = True
+
     return {
         "id": item_id,
         "title": unescape(str(title)),
         "price": price_text or "onbekend",
         "url": url,
         "location": location,
+        "is_business": is_business,
     }
 
 
@@ -354,6 +393,8 @@ def main():
 
         print(f"  {len(listings)} advertenties gevonden")
         for listing in listings:
+            if listing.get("is_business"):
+                continue
             title_lower = listing["title"].lower()
             if any(bad.lower() in title_lower for bad in EXCLUDE_TITLE_KEYWORDS):
                 continue
