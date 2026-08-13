@@ -46,7 +46,7 @@ jobs:
         run: |
           git config user.name "marktplaats-watch-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add state/seen_ids.json
+          git add state/seen_ids.json state/price_history.json
           git diff --staged --quiet && exit 0
           git commit -m "Update seen listings [skip ci]"
           # Probeer de push tot 3x, met een korte pauze ertussen, zodat een
