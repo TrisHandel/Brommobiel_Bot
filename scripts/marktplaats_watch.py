@@ -446,11 +446,37 @@ def guess_model(title: str) -> str:
     return "Aixam (overig)"
 
 
+CURRENT_YEAR = datetime.now(ZoneInfo("Europe/Amsterdam")).year
+
+
+def extract_year(title: str):
+    """Haalt een bouwjaar uit de titel, bv. '2015', 'bj. 2015' of 'bj \\'18'.
+    Geeft None terug als er niks betrouwbaars te vinden is."""
+    # Volledig jaartal, bv. "2015"
+    match = re.search(r"\b(19[89]\d|20[0-3]\d)\b", title)
+    if match:
+        year = int(match.group(1))
+        if 1980 <= year <= CURRENT_YEAR + 1:
+            return year
+    # Verkort jaartal met "bj"/"bouwjaar"/'-teken, bv. "bj. '18" of "bj 08"
+    match = re.search(r"(?:bj\.?|bouwjaar)\s*'?(\d{2})\b", title, re.IGNORECASE)
+    if match:
+        two_digit = int(match.group(1))
+        year = 2000 + two_digit if two_digit <= (CURRENT_YEAR - 2000) else 1900 + two_digit
+        return year
+    return None
+
+
 def guess_condition(text: str) -> str:
     """Bepaalt een ruwe staat-tier op basis van titel+omschrijving, zodat we
     prijzen alleen vergelijken binnen dezelfde conditie (een sloper mag niet
     met een showroomexemplaar vergeleken worden)."""
     text_lower = text.lower()
+    # Bugfix: "GEEN schade" / "zonder defect" mag niet als schade/defect
+    # tellen — we verwijderen ontkenningen vóór een negatief woord eerst.
+    text_lower = re.sub(
+        r"\b(geen|zonder|niet)\s+(schade|defect|storing|kapot|sloop)\b", "", text_lower
+    )
     for tier_name, keywords in CONDITION_TIERS:
         if any(kw in text_lower for kw in keywords):
             return tier_name
@@ -560,6 +586,17 @@ def format_message(listing: dict) -> str:
         pct = round(abs(diff_pct) * 100)
         richting = "goedkoper" if diff_pct >= 0 else "duurder"
         header = "🔥 <b>MOGELIJKE TOPDEAL</b>\n" if tier_label == "topdeal" else ""
+        downgrade_note = ""
+        if listing.get("topdeal_downgraded"):
+            missing = []
+            if listing.get("model") == "Aixam (overig)":
+                missing.append("model")
+            if listing.get("year") is None:
+                missing.append("bouwjaar")
+            downgrade_note = (
+                f"\nℹ️ Korting zou een topdeal-niveau halen, maar {' en '.join(missing)} "
+                f"niet duidelijk genoeg uit de titel — daarom geen topdeal-prioriteit."
+            )
         return (
             f"{header}"
             f"<b>{title}</b>\n"
@@ -568,6 +605,7 @@ def format_message(listing: dict) -> str:
             f"dus ~{pct}% {richting})\n"
             f"⚠️ Ruwe schatting op basis van model + conditie + prijs alleen — "
             f"check zelf bouwjaar, km-stand en staat!"
+            f"{downgrade_note}"
             f"{location_line}\n{url}"
         )
 
@@ -643,15 +681,27 @@ def main():
             model = guess_model(listing["title"])
             condition = guess_condition(combined_text)
             numeric_price = parse_price_to_number(listing["price"])
+            year = extract_year(listing["title"])
             listing["model"] = model
             listing["condition"] = condition
             listing["numeric_price"] = numeric_price
+            listing["year"] = year
 
             if numeric_price is not None:
                 tier_label, emoji, median_price, diff_pct = classify_price(
                     model, condition, numeric_price, price_history
                 )
                 if tier_label:
+                    # Topdeal-status ("prioriteit": pin + altijd pop-up) mag
+                    # alleen als merk (al gegarandeerd), model, bouwjaar EN
+                    # vraagprijs allemaal betrouwbaar bekend zijn. Ontbreekt
+                    # bouwjaar of is het model niet herkend (valt in "Aixam
+                    # (overig)")? Dan downgraden we naar een gewone melding
+                    # zonder prioriteit, met een duidelijke toelichting.
+                    model_known = model != "Aixam (overig)"
+                    if tier_label == "topdeal" and not (model_known and year is not None):
+                        listing["topdeal_downgraded"] = True
+                        tier_label, emoji = "goede prijs", "🟢"
                     listing["price_tier"] = (tier_label, emoji, median_price, diff_pct)
 
                 # Elke unieke advertentie draagt precies 1x bij aan de
