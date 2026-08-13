@@ -445,19 +445,27 @@ def parse_price_to_number(price_text: str):
     return value
 
 
-def check_deal(model: str, condition: str, price: float, history: dict):
+def classify_price(model: str, condition: str, price: float, history: dict):
     """Vergelijkt price met de mediaan van eerder gezien prijzen voor dit
     model EN dezelfde conditie-tier (dus geen sloper vs. showroomexemplaar).
-    Geeft (is_deal, mediaan, korting_percentage) terug."""
+    Geeft (tier_label, emoji, mediaan, verschil_percentage) terug, of
+    (None, None, None, None) als er nog te weinig data is om te vergelijken."""
     samples = history.get(model, {}).get(condition, [])
     if len(samples) < MIN_SAMPLES_FOR_COMPARISON:
-        return False, None, None
+        return None, None, None, None
     median_price = statistics.median(samples)
     if median_price <= 0:
-        return False, None, None
-    discount = (median_price - price) / median_price
-    is_deal = discount >= DEAL_DISCOUNT_THRESHOLD
-    return is_deal, median_price, discount
+        return None, None, None, None
+    # Positief % = goedkoper dan gemiddeld, negatief % = duurder dan gemiddeld
+    diff_pct = (median_price - price) / median_price
+
+    if diff_pct >= DEAL_DISCOUNT_THRESHOLD:
+        return "topdeal", "🔥", median_price, diff_pct
+    if diff_pct >= 0.15:
+        return "goede prijs", "🟢", median_price, diff_pct
+    if diff_pct >= -0.15:
+        return "gemiddelde prijs", "🟡", median_price, diff_pct
+    return "aan de prijzige kant", "🔴", median_price, diff_pct
 
 
 # ---------------------------------------------------------------------------
@@ -515,23 +523,30 @@ def format_message(listing: dict) -> str:
     location = listing["location"]
     url = listing["url"]
     location_line = f"\n📍 {location}" if location else ""
+    condition = listing.get("condition", "onbekend")
 
-    deal_info = listing.get("deal_info")
-    if deal_info:
-        median_price, discount = deal_info
-        pct = round(discount * 100)
-        condition = listing.get("condition", "onbekend")
+    price_tier = listing.get("price_tier")
+    if price_tier:
+        tier_label, emoji, median_price, diff_pct = price_tier
+        pct = round(abs(diff_pct) * 100)
+        richting = "goedkoper" if diff_pct >= 0 else "duurder"
+        header = "🔥 <b>MOGELIJKE TOPDEAL</b>\n" if tier_label == "topdeal" else ""
         return (
-            f"🔥 <b>MOGELIJKE TOPDEAL</b>\n"
+            f"{header}"
             f"<b>{title}</b>\n"
-            f"💶 {price} (gemiddeld voor '{condition}'-advertenties van dit model: "
-            f"~€ {median_price:,.0f}, dus ~{pct}% goedkoper)\n"
+            f"💶 {price} — {emoji} {tier_label} "
+            f"(gemiddeld voor '{condition}'-advertenties van dit model: ~€ {median_price:,.0f}, "
+            f"dus ~{pct}% {richting})\n"
             f"⚠️ Ruwe schatting op basis van model + conditie + prijs alleen — "
             f"check zelf bouwjaar, km-stand en staat!"
             f"{location_line}\n{url}"
         )
 
-    return f"🆕 <b>{title}</b>\n💶 {price}{location_line}\n{url}"
+    return (
+        f"🆕 <b>{title}</b>\n💶 {price} "
+        f"<i>(nog te weinig data voor dit model+conditie om te vergelijken)</i>"
+        f"{location_line}\n{url}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +606,7 @@ def main():
             if listing["id"] in seen_ids or listing["id"] in new_listings:
                 continue
 
-            # Model + conditie + numerieke prijs bepalen voor de deal-vergelijking.
+            # Model + conditie + numerieke prijs bepalen voor de prijsvergelijking.
             model = guess_model(listing["title"])
             condition = guess_condition(combined_text)
             numeric_price = parse_price_to_number(listing["price"])
@@ -599,9 +614,11 @@ def main():
             listing["condition"] = condition
             listing["numeric_price"] = numeric_price
             if numeric_price is not None:
-                is_deal, median_price, discount = check_deal(model, condition, numeric_price, price_history)
-                if is_deal:
-                    listing["deal_info"] = (median_price, discount)
+                tier_label, emoji, median_price, diff_pct = classify_price(
+                    model, condition, numeric_price, price_history
+                )
+                if tier_label:
+                    listing["price_tier"] = (tier_label, emoji, median_price, diff_pct)
 
             new_listings[listing["id"]] = listing
 
@@ -628,18 +645,21 @@ def main():
     if first_run or FORCE_SEED_ONLY:
         # Bij de allereerste run, of bij een handmatige seed-run na het
         # toevoegen van nieuwe zoektermen: alleen de state vullen, niet spammen.
+        prices_added = sum(1 for l in new_listings.values() if l.get("numeric_price") is not None)
         print(f"Seed-run: {len(new_listings)} advertenties opgeslagen als 'al gezien', geen meldingen verstuurd.")
         if first_run:
             send_telegram_message(
                 f"👋 Marktplaats-watcher is gestart ({timestamp}). "
-                f"{len(new_listings)} bestaande advertenties opgeslagen als basis. "
+                f"{len(new_listings)} bestaande advertenties opgeslagen als basis "
+                f"({prices_added} met bruikbare prijs voor de deal-vergelijking). "
                 f"Vanaf nu krijg je een melding bij elke check.",
                 silent=quiet,
             )
         else:
             send_telegram_message(
                 f"🔄 Seed-run uitgevoerd ({timestamp}): {len(new_listings)} bestaande advertenties "
-                f"toegevoegd aan de al-gezien-lijst, geen meldingen verstuurd.",
+                f"toegevoegd aan de al-gezien-lijst, waarvan {prices_added} met prijs meegenomen "
+                f"in de prijsvergelijking. Geen meldingen verstuurd.",
                 silent=True,
                 chat_id=TELEGRAM_HEARTBEAT_CHAT_ID,
             )
@@ -683,11 +703,12 @@ def main():
     # stille uren (00:00-05:00) — dan komt het bericht wel binnen, maar stil.
     print(f"{len(new_listings)} nieuwe advertentie(s), Telegram-berichten versturen...")
     for listing in new_listings.values():
-        is_deal = bool(listing.get("deal_info"))
+        price_tier = listing.get("price_tier")
+        is_topdeal = bool(price_tier) and price_tier[0] == "topdeal"
         # Een mogelijke topdeal altijd met pop-up versturen, ook 's nachts —
         # dit is precies het soort melding waarvoor je wél gewekt wilt worden.
-        message_id = send_telegram_message(format_message(listing), silent=(quiet and not is_deal))
-        if is_deal and message_id:
+        message_id = send_telegram_message(format_message(listing), silent=(quiet and not is_topdeal))
+        if is_topdeal and message_id:
             pin_telegram_message(message_id)
         time.sleep(0.5)
 
